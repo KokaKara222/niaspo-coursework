@@ -1,0 +1,121 @@
+name: Payments CD
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: payments-swarm-deployment
+  cancel-in-progress: false
+
+jobs:
+  check-ci:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful CI for this commit
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              ...context.repo,
+              workflow_id: 'payments-ci.yml',
+              head_sha: context.sha,
+              event: 'push',
+              status: 'success',
+              per_page: 100
+            });
+            const passed = data.workflow_runs.find(run =>
+              run.head_sha === context.sha && run.conclusion === 'success');
+            if (!passed) {
+              core.setFailed('Wait for successful Payments CI for this version, then run Payments CD again.');
+            } else {
+              core.info(`Verified CI: ${passed.html_url}`);
+            }
+
+  deploy:
+    needs: check-ci
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: payment-service
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check local tools
+        run: |
+          docker info > /dev/null
+          docker compose version
+          python3 --version
+          mkdir -p results
+      - name: Build application for this Mac
+        env:
+          DEPLOY_COMMIT: ${{ github.sha }}
+        run: |
+          docker build -t "niaspo-payments-app:$DEPLOY_COMMIT" .
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          tag = os.environ['DEPLOY_COMMIT']
+          for name in ('swarm/deploy.sh', 'swarm/stack.yaml'):
+              path = Path(name)
+              original = path.read_text()
+              assert 'niaspo-payments-app:latest' in original, name
+              path.write_text(original.replace('niaspo-payments-app:latest',
+                                              'niaspo-payments-app:' + tag))
+          Path('results/deployed-commit.txt').write_text(tag + '\n')
+          PY
+      - name: Download infrastructure images
+        run: |
+          docker pull docker:28-dind
+          docker pull postgres:17-alpine
+          docker pull nginx:1.28-alpine
+          docker pull prom/prometheus:v3.5.0
+      - name: Deploy to local Swarm
+        run: sh swarm/deploy.sh
+      - name: Wait for API and database
+        run: |
+          ready=false
+          for attempt in {1..150}; do
+            code=$(curl --silent --max-time 5 --output /dev/null --write-out '%{http_code}' \
+              http://127.0.0.1:28082/payments/00000000-0000-0000-0000-000000000000 || true)
+            if [ "$code" = 404 ]; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then
+            echo "Swarm API did not become ready"
+            exit 1
+          fi
+      - name: Check payments and worker recovery
+        run: python3 swarm/check.py
+      - name: Collect deployment status
+        if: always()
+        run: |
+          mkdir -p results
+          docker compose -f swarm/nodes.yaml ps -a > results/cd-nodes.txt
+          docker compose -f swarm/nodes.yaml exec -T manager \
+            docker stack services payments > results/cd-services.txt 2>&1 || true
+          docker compose -f swarm/nodes.yaml exec -T manager \
+            docker service ps payments_app > results/cd-replicas.txt 2>&1 || true
+          docker compose -f swarm/nodes.yaml exec -T manager \
+            docker service inspect payments_app --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' \
+            > results/cd-image.txt 2>&1 || true
+      - name: Save deployment reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: payments-deployment-results
+          path: |
+            payment-service/results/deployed-commit.txt
+            payment-service/results/swarm-*.txt
+            payment-service/results/cd-*.txt
