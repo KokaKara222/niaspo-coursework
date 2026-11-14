@@ -1,0 +1,25 @@
+name: niaspo-swarm-lab
+x-node: &node
+  image: docker:28-dind
+  privileged: true
+  environment:
+    DOCKER_TLS_CERTDIR: /certs
+  command: ["--storage-driver=vfs"]
+services:
+  manager:
+    <<: *node
+    hostname: manager
+    ports: ["127.0.0.1:28082:8080", "127.0.0.1:29090:9090"]
+    volumes: [manager-data:/var/lib/docker]
+  worker1:
+    <<: *node
+    hostname: worker1
+    volumes: [worker1-data:/var/lib/docker]
+  worker2:
+    <<: *node
+    hostname: worker2
+    volumes: [worker2-data:/var/lib/docker]
+volumes:
+  manager-data:
+  worker1-data:
+  worker2-data:

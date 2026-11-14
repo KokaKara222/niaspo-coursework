@@ -1,0 +1,50 @@
+name: niaspo-payments
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: payments
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: local-demo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  app: &payment-app
+    image: niaspo-payments-app
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/payments
+      SPRING_DATASOURCE_USERNAME: payments
+      SPRING_DATASOURCE_PASSWORD: local-demo
+    ports:
+      - "127.0.0.1:18080:8080"
+  app2:
+    <<: *payment-app
+    ports:
+      - "127.0.0.1:18081:8080"
+  nginx:
+    image: nginx:1.28-alpine
+    depends_on:
+      - app
+      - app2
+    ports:
+      - "127.0.0.1:18082:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    ports:
+      - "127.0.0.1:19090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+volumes:
+  prometheus-data:
+  pgdata:

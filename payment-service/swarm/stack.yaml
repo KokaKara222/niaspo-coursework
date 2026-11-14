@@ -1,0 +1,57 @@
+version: "3.8"
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: payments
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: local-demo
+    volumes: [pgdata:/var/lib/postgresql/data]
+    deploy:
+      placement:
+        constraints: [node.hostname == manager]
+  app:
+    image: niaspo-payments-app:latest
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/payments
+      SPRING_DATASOURCE_USERNAME: payments
+      SPRING_DATASOURCE_PASSWORD: local-demo
+    deploy:
+      replicas: 2
+      endpoint_mode: dnsrr
+      placement:
+        constraints: [node.role == worker]
+        max_replicas_per_node: 1
+  nginx:
+    image: nginx:1.28-alpine
+    configs:
+      - source: proxy
+        target: /etc/nginx/conf.d/default.conf
+    ports:
+      - target: 80
+        published: 8080
+        mode: host
+    deploy:
+      placement:
+        constraints: [node.hostname == manager]
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    configs:
+      - source: metrics
+        target: /etc/prometheus/prometheus.yml
+    volumes: [metrics-data:/prometheus]
+    ports:
+      - target: 9090
+        published: 9090
+        mode: host
+    deploy:
+      placement:
+        constraints: [node.hostname == manager]
+volumes:
+  pgdata:
+  metrics-data:
+configs:
+  proxy:
+    file: ./swarm-nginx.conf
+  metrics:
+    file: ./swarm-prometheus.yml
