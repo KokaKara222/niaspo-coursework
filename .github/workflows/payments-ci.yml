@@ -1,0 +1,66 @@
+name: Payments CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: payment-service
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate configuration
+        run: docker compose config --quiet
+      - name: Build application image
+        run: docker compose build app
+      - name: Start temporary stack
+        run: docker compose up -d --no-build
+      - name: Wait for both application instances
+        shell: bash
+        run: |
+          for port in 18080 18081; do
+            ready=false
+            for attempt in {1..90}; do
+              if curl --fail --silent "http://127.0.0.1:$port/payments/00000000-0000-0000-0000-000000000000" -o /dev/null; then
+                ready=true
+                break
+              fi
+              code=$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$port/payments/00000000-0000-0000-0000-000000000000" || true)
+              if [ "$code" = 404 ]; then
+                ready=true
+                break
+              fi
+              sleep 2
+            done
+            if [ "$ready" != true ]; then
+              echo "Application on port $port did not become ready"
+              exit 1
+            fi
+          done
+      - name: Check payment operations and balances
+        run: python3 scripts/demo.py
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p ci-results
+          docker compose ps -a > ci-results/containers.txt
+          docker compose logs --no-color > ci-results/compose.log 2>&1
+      - name: Save reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: payments-check-results
+          path: |
+            payment-service/results/demo-*.txt
+            payment-service/ci-results/
+      - name: Stop temporary stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans
